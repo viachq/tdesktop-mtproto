@@ -16,6 +16,10 @@ add_library(tdesktop_mtproto STATIC
     src/tl/serializer.cpp
     src/mtproto/transport.cpp
     src/mtproto/msg_id.cpp
+    src/mtproto/auth_key.cpp
+    src/mtproto/session.cpp
+    src/mtproto/init_connection.cpp
+    src/mtproto/connection.cpp
 )
 
 target_include_directories(tdesktop_mtproto PUBLIC

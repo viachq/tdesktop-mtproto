@@ -133,6 +133,47 @@ private:
     size_t pos_;
 };
 
+// === RSA Public Key ===
+struct RSAPublicKey {
+    RSAPublicKey() = default;
+    RSAPublicKey(uint64_t fingerprint);
+
+    std::vector<uint8_t> encrypt(const std::vector<uint8_t>& data) const;
+    uint64_t fingerprint() const;
+    bool valid() const { return valid_; }
+
+private:
+    std::vector<uint8_t> n_;
+    std::vector<uint8_t> e_;
+    bool valid_ = false;
+};
+
+// === MTProto 2.0 KDF ===
+void mtproto_kdf(const uint8_t auth_key[256], const uint8_t msg_key[16],
+                 uint8_t aes_key[32], uint8_t aes_iv[32],
+                 bool is_server);
+
+// === Auth Key Creation (PQ/DH handshake) ===
+class AuthKeyCreator {
+public:
+    AuthKeyCreator();
+
+    // Step 1: Process req_pq response (server sends PQ + fingerprints)
+    // Returns the auth key creation request
+    std::vector<uint8_t> process_pq(const uint8_t* pq, int pq_len,
+                                    const uint64_t* fingerprints, int fp_count);
+
+    // Step 2: Process Server-DH params, finalizes auth key
+    bool process_dh_params(const uint8_t* encrypted_answer, int answer_len);
+
+    AuthKey get_auth_key() const { return auth_key_; }
+
+private:
+    AuthKey auth_key_;
+    uint8_t temp_key_[256]{};
+    bool has_temp_key_ = false;
+};
+
 // === Session (msg_id, seqno, salt) ===
 class Session {
 public:
