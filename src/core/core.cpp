@@ -48,6 +48,26 @@ constexpr uint32_t kTrue = 0x997275b5;
 constexpr uint32_t kFalse = 0xbc799737;
 constexpr int kLayer = 177;
 
+// API method constructors (from Telegram MTProto schema)
+constexpr uint32_t kHelpGetConfig = 0xc4f9186b;
+constexpr uint32_t kAuthSendCode = 0xa677244f;
+constexpr uint32_t kAuthSignIn = 0x8d52a951;
+constexpr uint32_t kAuthCheckPassword = 0xd18b4d16;
+constexpr uint32_t kAuthImportAuthorization = 0xa57a7dad;
+constexpr uint32_t kMessagesSendMessage = 0xfef48f62;
+constexpr uint32_t kMessagesGetDialogs = 0xa0f4cb4f;
+constexpr uint32_t kMessagesGetHistory = 0x4423e6c5;
+constexpr uint32_t kMessagesGetMessages = 0x63c66506;
+constexpr uint32_t kHelpGetNearestDc = 0x1fb33026;
+constexpr uint32_t kUpdatesGetState = 0xedd4882a;
+constexpr uint32_t kContactsResolveUsername = 0x725afbbc;
+// Type constructors
+constexpr uint32_t kInputPeerSelf = 0x7da07ec9;
+constexpr uint32_t kInputPeerUser = 0x7b8e7de6;
+constexpr uint32_t kInputPeerChat = 0x179be863;
+constexpr uint32_t kInputPeerChannel = 0x20adaef8;
+constexpr uint32_t kInputPeerEmpty = 0x7f3b18ea;
+
 const DCEndpoint kDCs[] = {
     {1,"149.154.175.53",443},{2,"149.154.167.51",443},
     {3,"149.154.175.100",443},{4,"149.154.167.91",443},
@@ -402,8 +422,9 @@ bool Client::connect(int dc){
     return true;
 }
 void Client::disconnect(){impl_->tr.disc();}
-bool Client::is_connected()const{return impl_->tr.s!=INVALID_SOCKET;}
+bool Client::is_connected()const{return impl_->authed&&impl_->tr.s!=INVALID_SOCKET;}
 int32_t Client::api_id()const{return impl_->cfg.api_id;}
+std::vector<uint8_t> Client::encrypted_call(const std::vector<uint8_t>& body){return impl_->encrpc(body);}
 
 // ======== C API ========
 extern "C" {
@@ -418,5 +439,17 @@ extern "C" {
     __declspec(dllexport) void mtproto_destroy(void* cl){delete(Client*)cl;}
     __declspec(dllexport) int mtproto_api_id(void* cl){return((Client*)cl)->api_id();}
     __declspec(dllexport) const char* mtproto_version(){return "0.1.0";}
+// Encrypted RPC: send raw request body, get raw response
+    __declspec(dllexport) uint8_t* mtproto_call(void* cl, const uint8_t* req, int req_len, int* resp_len) {
+        auto* client = ((Client*)cl);
+        auto body = std::vector<uint8_t>(req, req+req_len);
+        auto resp = client->encrypted_call(body);
+        if (resp.empty()) { *resp_len = 0; return nullptr; }
+        *resp_len = (int)resp.size();
+        auto* buf = (uint8_t*)malloc(resp.size());
+        memcpy(buf, resp.data(), resp.size());
+        return buf;
+    }
+    __declspec(dllexport) void mtproto_free(uint8_t* buf) { free(buf); }
 }
 } // namespace

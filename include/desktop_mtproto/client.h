@@ -32,6 +32,7 @@ public:
     void disconnect();
     bool is_connected() const;
     int32_t api_id() const;
+    std::vector<uint8_t> encrypted_call(const std::vector<uint8_t>& body);
 private:
     ClientImpl* impl_;
 };
