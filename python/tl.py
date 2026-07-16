@@ -23,7 +23,7 @@ import random
 import struct
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Union
-from .tl_constructors import FUNCTIONS, TYPES, INPUT_PEER_SELF
+from .tl_schema import FUNCTIONS, TYPES, TL_SCHEMA
 
 
 class TL:
@@ -206,7 +206,6 @@ class TL:
     
     def _get_schema_args(self, name):
         """Get the argument definitions for a TL object type."""
-        # Look up in our schema knowledge base
         return TL_SCHEMA.get(name, [])
     
     def _find_bare_constructor(self, type_name, value):
@@ -269,36 +268,6 @@ class TL:
     def align(self):
         while len(self.data) % 4:
             self.data.append(0)
-
-
-# === TL SCHEMA KNOWLEDGE BASE ===
-# Minimal set of arg definitions for commonly used types
-# Full version would be generated from api.tl
-TL_SCHEMA = {
-    'codeSettings': [
-        {'name': 'flags', 'is_flag': True},
-        {'name': 'allow_flashcall', 'tl_type': 'flags.0?true', 'cond': 0},
-        {'name': 'current_number', 'tl_type': 'flags.1?Bool', 'cond': 1},
-        {'name': 'allow_app_hash', 'tl_type': 'flags.4?Bool', 'cond': 4},
-        {'name': 'allow_missed_call', 'tl_type': 'flags.5?Bool', 'cond': 5},
-        {'name': 'allow_firebase', 'tl_type': 'flags.7?Bool', 'cond': 7},
-        {'name': 'logout_tokens', 'tl_type': 'flags.6?Vector<bytes>', 'cond': 6},
-        {'name': 'token', 'tl_type': 'flags.3?string', 'cond': 3},
-        {'name': 'app_sandbox', 'tl_type': 'flags.8?Bool', 'cond': 8},
-    ],
-    'inputPeerSelf': [],
-    'inputPeerUser': [
-        {'name': 'user_id', 'tl_type': 'long'},
-        {'name': 'access_hash', 'tl_type': 'long'},
-    ],
-    'inputPeerChat': [
-        {'name': 'chat_id', 'tl_type': 'long'},
-    ],
-    'inputPeerChannel': [
-        {'name': 'channel_id', 'tl_type': 'long'},
-        {'name': 'access_hash', 'tl_type': 'long'},
-    ],
-}
 
 
 class Session:

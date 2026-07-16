@@ -1,5 +1,7 @@
-"""desktop-mtproto - Python TL serialization layer + C++ MTProto engine."""
+"""desktop-mtproto — Python TL serialization engine + C++ MTProto transport.
+"""
 from .tl import Session, TL
+from .tl_schema import FUNCTIONS, TL_SCHEMA
 
 class Client:
     """Telegram client using tdesktop-level MTProto.
@@ -27,88 +29,133 @@ class Client:
         return self._api_id
 
     def call(self, method: str, params: dict = None) -> dict:
-        """Execute an MTProto API method and return parsed response.
+        """Execute an MTProto API method.
 
         Args:
             method: e.g. "auth.sendCode", "messages.sendMessage"
-            params: Parameters for the method as a dict
+            params: Parameters as dict with field names matching the TL schema
 
         Returns:
-            Parsed TL response as nested dicts
+            Parsed TL response as dict
         """
-        # 1. Build the raw method call body
+        if params is None:
+            params = {}
+
+        # 1. Build method body using schema args for field ordering
         tl = TL()
-        
-        # Write constructor number
-        from .tl_constructors import FUNCTIONS
+
+        # Write constructor
         cons = FUNCTIONS.get(method)
         if cons is None:
             raise ValueError(f"Unknown method: {method}")
         tl.write_uint(cons)
-        
-        # Write parameters according to TL schema
-        if params:
-            # For simple methods, write params in order as TL values
-            # Complex methods need proper schema parsing
-            for key, value in params.items():
-                tl.write_value(value)
 
-        # 2. Wrap in initConnection (for stateful methods)
+        # Get schema args for field ordering
+        schema_args = TL_SCHEMA.get(method, [])
+        flags_mask = 0
+
+        # First pass: calculate flags
+        for arg in schema_args:
+            if arg.get('is_flag'):
+                continue
+            cond = arg.get('cond')
+            if cond is not None:
+                fn = arg['name']
+                if fn in params and params[fn] is not None:
+                    flags_mask |= (1 << cond)
+
+        # Second pass: write fields in schema order
+        for arg in schema_args:
+            if arg.get('is_flag'):
+                tl.write_uint(flags_mask)
+                continue
+
+            fn = arg['name']
+            cond = arg.get('cond')
+            if cond is not None and not (flags_mask & (1 << cond)):
+                continue
+
+            value = params.get(fn)
+            if value is None and cond is not None:
+                continue
+
+            tl._write_field(arg, value, flags_mask)
+
+        # 2. Wrap in initConnection + invokeWithLayer
         wrapped = self._build_invoke_with_layer(tl.data)
 
         # 3. Send through encrypted session
         result_bytes = self._session.encrypted_call(bytes(wrapped))
         if result_bytes is None:
-            return {"error": "RPC call failed"}
+            return {"error": "RPC call failed", "_rpc_error": True}
 
         # 4. Parse response
         return self._parse_response(result_bytes)
 
-    def _build_invoke_with_layer(self, body: bytes) -> bytes:
+    def _build_invoke_with_layer(self, body):
         """Wrap in invokeWithLayer + initConnection as tdesktop does."""
         tl = TL()
         tl.write_uint(0xda9b0d0d)  # invokeWithLayer
-        tl.write_int(177)           # layer version
+        tl.write_int(177)
         tl.write_uint(0xc1cd5ea9)  # initConnection
-        tl.write_uint(2)            # flags (has params)
+        tl.write_uint(2)            # flags: has params
         tl.write_int(self._api_id)
         tl.write_string("Desktop PC")
         tl.write_string("Windows 10")
         tl.write_string("7.0.1")
-        tl.write_string("en")       # system_lang_code
-        tl.write_string("tdesktop") # lang_pack
-        tl.write_string("en")       # lang_code
+        tl.write_string("en")
+        tl.write_string("tdesktop")
+        tl.write_string("en")
         # params: tz_offset
         tl.write_uint(0x99c1d49d)   # jsonObject
         tl.write_string("tz_offset")
         tl.write_uint(0x2be0df57)   # jsonNumber
-        tl.write_double(10800.0)    # UTC+3
+        tl.write_double(10800.0)     # UTC+3
         tl.data += body
         return bytes(tl.data)
 
-    def _parse_response(self, data: bytes) -> dict:
+    def _parse_response(self, data):
         """Parse TL response into Python dict."""
-        if not data or len(data) < 4:
-            return {"error": "empty response"}
-        
-        # Simple response parser - for complex types we need full schema
-        result = {"_raw": data.hex()}
+        result = {}
         pos = [0]
-        
+
         try:
             cons = TL.read_uint(data, pos)
-            result["_constructor"] = hex(cons)
-            
-            # Try to identify common response types
+            result["_"] = hex(cons)
+
+            # Check for rpc_result wrapper
             if cons == 0xf35c6d01:  # rpc_result
-                result["_type"] = "rpc_result"
+                req_msg_id = TL.read_long(data, pos)
+                result["_req_msg_id"] = req_msg_id
+                # Next is the actual response object
+                if pos[0] < len(data):
+                    inner = self._parse_object(data, pos)
+                    result.update(inner)
+
             elif cons == 0x2144ca19:  # rpc_error
+                error_code = TL.read_int(data, pos)
+                error_msg = TL.read_string(data, pos)
                 result["_type"] = "rpc_error"
-                
+                result["error_code"] = error_code
+                result["error_message"] = error_msg
+
+            else:
+                result["_hex"] = data.hex()
+
+        except Exception as e:
+            result["_parse_error"] = str(e)
             result["_hex"] = data.hex()
-        except:
-            pass
-        
+
+        return result
+
+    def _parse_object(self, data, pos):
+        """Parse a TL object from response data."""
+        result = {}
+        if pos[0] >= len(data):
+            return result
+
+        cons = TL.read_uint(data, pos)
+        result["_"] = hex(cons)
         return result
 
     def __del__(self):
