@@ -111,6 +111,7 @@ void TLS::write_string(const std::string& v) {
 int32_t TLS::read_int32(const uint8_t* d, size_t& p, size_t) { p+=4; return *(const int32_t*)(d+p-4); }
 int64_t TLS::read_int64(const uint8_t* d, size_t& p, size_t) { p+=8; return *(const int64_t*)(d+p-8); }
 uint32_t TLS::read_uint32(const uint8_t* d, size_t& p, size_t s) { return(uint32_t)read_int32(d,p,s); }
+void TLS::read_int128(const uint8_t* d, size_t& p, size_t s, uint8_t* out) { if(p+16<=s){memcpy(out,d+p,16);p+=16;}}
 
 std::string TLS::read_string(const uint8_t* d, size_t& p, size_t s) {
     if (p>=s) return {};
@@ -265,43 +266,122 @@ struct ClientImpl {
         if(!fp)return false;
         uint64_t pqv=0; memcpy(&pqv,pq.data(), (std::min)(pq.size(),size_t(8)));
         uint64_t p1=prho(pqv),q1=pqv/p1; if(p1>q1)std::swap(p1,q1);
-        
-        // req_DH_params
+
+        // Convert p,q to big-endian bytes with leading zero trimming
+        auto to_be_bytes=[](uint64_t v)->std::vector<uint8_t>{
+            uint8_t buf[8]; std::vector<uint8_t> r;
+            for(int i=7;i>=0;i--) buf[7-i]=(uint8_t)(v>>(i*8));
+            for(int i=0;i<8;i++){r.push_back(buf[i]);}
+            while(r.size()>1&&r[0]==0) r.erase(r.begin());
+            return r;
+        };
+        auto pv=to_be_bytes(p1), qv=to_be_bytes(q1);
+
+        // req_DH_params inner_data: pq + p + q + nonce + server_nonce + new_nonce + padding to 255
         rf(nn,32);
-        TLS inner; inner.write_bytes((const uint8_t*)pq.data(),pq.size());
-        inner.write_int128(pq.size()<=64?(const uint8_t*)pq.data():nonce); // wrong: fix properly
-        // Actually need: pq + p + q + nonce + server_nonce + new_nonce + 0x00* → 255 + padding(192)
-        // This is the tdesktop inner data format for RSA encryption
-        TLS idata;
-        idata.write_bytes((const uint8_t*)pq.data(),pq.size());
-        // Write p and q as big-endian bytes (MTProto format)
-        { uint8_t pb[8],qb[8]; memset(pb,0,8); memset(qb,0,8);
-          memcpy(pb,&p1,8); memcpy(qb,&q1,8);
-          // Remove leading zeros (but keep at least 1 byte each)
-          idata.write_bytes(pb,8); idata.write_bytes(qb,8); }
-        idata.write_int128(nonce); idata.write_bytes(svr_nonce.data(),svr_nonce.size());
-        idata.write_int128(nn);
-        // Pad to 192 + 63 = 255 bytes as required
-        while(idata.buf_.size()<255) idata.buf_.push_back(0);
-        idata.buf_.resize(255);
-        auto enc_data=rsa_enc(idata.buf_.data(),idata.buf_.size());
+        TLS inner;
+        inner.write_string(pq);           // pq as TL string
+        inner.write_bytes(pv.data(),pv.size()); // p as TL bytes
+        inner.write_bytes(qv.data(),qv.size()); // q as TL bytes
+        inner.write_int128(nonce);
+        inner.buf_.insert(inner.buf_.end(),svr_nonce.begin(),svr_nonce.end());
+        inner.write_int128(nn);  // first 16 of new_nonce
+        inner.write_int128(nn+16); // second 16 of new_nonce
+        while(inner.buf_.size()<255) inner.buf_.push_back(0);
+        inner.buf_.resize(255);
+        auto enc_data=rsa_enc(inner.buf_.data(),inner.buf_.size());
         if(enc_data.empty())return false;
-        
-        TLS dh_req; dh_req.write_uint32(kReqDH);
-        dh_req.write_int128(nonce); dh_req.write_bytes(svr_nonce.data(),svr_nonce.size());
-        dh_req.write_string(pq);
-        dh_req.write_int32(0); // p q count? No, actually the format is different
-        // Actually req_DH_params format: nonce + server_nonce + pq (bytes) + p (bytes) + q (bytes) + fingerprint + encrypted_data
-        // Let me redo this properly
-        TLS dh2; dh2.write_uint32(kReqDH);
-        dh2.write_int128(nonce); dh2.write_bytes(svr_nonce.data(),svr_nonce.size());
-        dh2.write_string(pq);
-        dh2.write_bytes((const uint8_t*)&p1, (p1>0xFF?2:1)); // p as bytes
-        // Actually p and q must be serialized as TL bytes with proper length
-        // This needs to match tdesktop's exact format
-        
-        // For now, complete with basic auth - the detailed DH handshake
-        // requires precise TL serialization matching the server's expectation
+
+        // req_DH_params: nonce + server_nonce + p(string) + q(string) + fingerprint(int64) + encrypted_data(string)
+        TLS dh; dh.write_uint32(kReqDH);
+        dh.write_int128(nonce);
+        dh.buf_.insert(dh.buf_.end(),svr_nonce.begin(),svr_nonce.end());
+        dh.write_string(std::string((const char*)pv.data(),pv.size()));
+        dh.write_string(std::string((const char*)qv.data(),qv.size()));
+        dh.write_int64((int64_t)kRsaFp);
+        dh.write_bytes(enc_data.data(),enc_data.size());
+
+        resp=unrpc(nid(),dh.buf_); if(resp.empty())return false;
+        pos=0;
+        auto srv_cons=TLS::read_uint32(resp.data(),pos,resp.size());
+        if(srv_cons!=kSrvDHok) return false;
+        // Parse server_DH_params_ok: nonce + server_nonce + encrypted_answer(string)
+        {uint8_t _[16]; TLS::read_int128(resp.data(),pos,resp.size(),_);} // nonce check
+        TLS::read_bytes(resp.data(),pos,resp.size()); // server_nonce check
+        auto enc_ans=TLS::read_bytes(resp.data(),pos,resp.size());
+
+        // Derive temp AES key/iv from nonce, server_nonce, new_nonce
+        uint8_t t1[20],t2[20],t3[20],t4[20];
+        {
+            uint8_t buf1[48],buf2[48],buf3[48],buf4[32];
+            memcpy(buf1,nn,32); memcpy(buf1+32,svr_nonce.data(),16); SHA1(buf1,48,t1);
+            memcpy(buf2,svr_nonce.data(),16); memcpy(buf2+16,nn,32); SHA1(buf2,48,t2);
+            memcpy(buf3,nn,32); memcpy(buf3+32,nn,32); SHA1(buf3,64,t3);
+            memcpy(buf4,nonce,16); memcpy(buf4+16,nonce,16); SHA1(buf4,32,t4);
+        }
+        uint8_t tmp_key[32],tmp_iv[32];
+        memcpy(tmp_key,t1,16); memcpy(tmp_key+16,t2,12);
+        memcpy(tmp_iv,t2+12,8); memcpy(tmp_iv+8,t3,4); memcpy(tmp_iv+12,t4,4);
+
+        // Decrypt encrypted_answer with AES-IGE using temp key/iv
+        std::vector<uint8_t> srv_dec(enc_ans.size());
+        aesige(enc_ans.data(),enc_ans.size(),tmp_key,tmp_iv,srv_dec.data(),false);
+
+        // Parse decrypted answer: nonce + server_nonce + g (int) + dh_prime (bytes) + g_a (bytes) + server_time (int)
+        size_t dp=0;
+        {uint8_t _[16]; TLS::read_int128(srv_dec.data(),dp,srv_dec.size(),_);} // nonce
+        TLS::read_bytes(srv_dec.data(),dp,srv_dec.size()); // server_nonce
+        int g_val=TLS::read_int32(srv_dec.data(),dp,srv_dec.size());
+        auto dh_prime=TLS::read_bytes(srv_dec.data(),dp,srv_dec.size());
+        auto g_a=TLS::read_bytes(srv_dec.data(),dp,srv_dec.size());
+        int svr_time=TLS::read_int32(srv_dec.data(),dp,srv_dec.size());
+
+        // Compute auth_key = g_a^b mod dh_prime
+        BIGNUM *g_bn=BN_new(),*dh_bn=BN_new(),*g_a_bn=BN_new();
+        auto *ctx=BN_CTX_new();
+        uint8_t b_buf[256]; rf(b_buf,256);
+        BIGNUM *b=BN_bin2bn(b_buf,256,nullptr);
+        BN_bin2bn((const uint8_t*)&g_val,sizeof(g_val),g_bn);
+        BN_bin2bn(dh_prime.data(),(int)dh_prime.size(),dh_bn);
+        BN_bin2bn(g_a.data(),(int)g_a.size(),g_a_bn);
+
+        // Compute g_b = g^b mod dh_prime
+        BIGNUM *g_b=BN_new();
+        BN_mod_exp(g_b,g_bn,b,dh_bn,ctx);
+
+        // Compute auth_key = g_a^b mod dh_prime
+        BIGNUM *ak_bn=BN_new();
+        BN_mod_exp(ak_bn,g_a_bn,b,dh_bn,ctx);
+        BN_bn2bin(ak_bn,ak);
+
+        // Compute auth_key_id (lower 64 bits of SHA1 of auth_key)
+        uint8_t ak_sha[20]; SHA1(ak,256,ak_sha);
+        memcpy(&akid,ak_sha+12,8);
+
+        // set_client_DH_params
+        TLS cdh; cdh.write_uint32(kCliDH);
+        cdh.write_int128(nonce);
+        cdh.buf_.insert(cdh.buf_.end(),svr_nonce.begin(),svr_nonce.end());
+        // client_DH_inner_data: nonce + server_nonce + retry_id(0) + g_b(bytes)
+        TLS ci; ci.write_int128(nonce);
+        ci.buf_.insert(ci.buf_.end(),svr_nonce.begin(),svr_nonce.end());
+        ci.write_int64(0); // retry_id
+        uint8_t gb_buf[256]; memset(gb_buf,0,256);
+        BN_bn2bin(g_b,gb_buf+(256-BN_num_bytes(g_b)));
+        ci.write_bytes(gb_buf,256);
+        while(ci.buf_.size()%16) ci.buf_.push_back(0);
+        // Encrypt with temp key
+        std::vector<uint8_t> ci_enc(ci.buf_.size());
+        aesige(ci.buf_.data(),ci.buf_.size(),tmp_key,tmp_iv,ci_enc.data(),true);
+        cdh.write_bytes(ci_enc.data(),ci_enc.size());
+
+        resp=unrpc(nid(),cdh.buf_); if(resp.empty())return false;
+        pos=0;
+        auto dh_cons=TLS::read_uint32(resp.data(),pos,resp.size());
+        if(dh_cons!=kDhGenOk) return false;
+        BN_free(g_bn); BN_free(dh_bn); BN_free(g_a_bn); BN_free(b); BN_free(g_b); BN_free(ak_bn);
+        BN_CTX_free(ctx);
+        authed=true;
         return true;
     }
 };

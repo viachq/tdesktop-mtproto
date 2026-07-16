@@ -51,6 +51,7 @@ struct TLS {
     static int32_t read_int32(const uint8_t* data, size_t& pos, size_t size);
     static int64_t read_int64(const uint8_t* data, size_t& pos, size_t size);
     static uint32_t read_uint32(const uint8_t* data, size_t& pos, size_t size);
+    static void read_int128(const uint8_t* data, size_t& pos, size_t size, uint8_t* out);
     static std::vector<uint8_t> read_bytes(const uint8_t* data, size_t& pos, size_t size);
     static std::string read_string(const uint8_t* data, size_t& pos, size_t size);
 };
