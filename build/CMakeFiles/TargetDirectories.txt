@@ -1,0 +1,4 @@
+E:/tdesktop-mtproto/build/CMakeFiles/tdesktop_mtproto.dir
+E:/tdesktop-mtproto/build/CMakeFiles/test_mtproto.dir
+E:/tdesktop-mtproto/build/CMakeFiles/ALL_BUILD.dir
+E:/tdesktop-mtproto/build/CMakeFiles/ZERO_CHECK.dir
